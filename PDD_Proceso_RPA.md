@@ -1,57 +1,126 @@
-# Documentación del Proceso RPA: Carga Masiva de OCs en Coupa
+# Documentación Integral del Proceso RPA: Carga Masiva de OCs en Coupa de Natura
 
-## 1. Descripción General del Proyecto
-Este proyecto es una automatización basada en **Playwright** (Python) que se encarga de leer filas desde un archivo de Google Sheets y transformarlas en Órdenes de Compra (OC) dentro del portal Coupa de Natura. El RPA está diseñado para acelerar y asegurar la correcta creación masiva de OCs a partir de una planilla estandarizada.
-
-El objetivo principal es tomar los datos pendientes (aquellos cuyas filas en la columna **REALIZADA** son `FALSE`), buscar una "Solicitud Base" indicada en el mismo Google Sheets, copiarla y modificar los datos de los ítems del carrito según el proveedor, el monto neto o exento, justificación, impuesto, y cuentas contables antes de proceder a guardar el borrador y extraer el # de solicitud de vuelta al Sheet.
+Este documento detalla a nivel funcional y técnico todo el funcionamiento, la arquitectura y los requisitos del robot (RPA) creado para la automatización masiva de Órdenes de Compra (OCs) en la plataforma corporativa Coupa usando Python y Playwright. Su objetivo es que tanto perfiles técnicos como principiantes puedan entender, instalar, y escalar el código.
 
 ---
 
-## 2. Flujo Funcional y Técnico (Paso a Paso)
+## 1. Introducción y Alcance
+El RPA extrae información tabulada de un archivo de Google Sheets alimentado por el equipo operativo. Para evitar la enorme carga manual (y mitigar errores humanos) de ingresar factura por factura, el script entra a Coupa de Natura, realiza un duplicado de un carrito o solicitud de compra anterior ("Solicitud Base"), lo "limpia" borrando la información adjunta, y procede a crear entre 1 y 2 carritos nuevos para cada fila del Excel (generando OCs independientes para montos `NETO` y montos `EXENTOS`). Toda cuenta contable, CECO, y código SAP se reajusta automáticamente antes de guardar el borrador en el portal y marcar el ciclo como `REALIZADO` devolviendo el número de OC de vuelta a Google Sheets.
 
-### 2.1. Conexión y Filtro Inicial
-1. El script principal (ya sea `main.py` o su versión de pruebas `main_test.py`) comienza autorizando la conexión a Google Sheets a través del sistema OAuth usando un token validado.
-2. Lee todos los datos de la hoja configurada en `config.py` (ej. `CONSOLIDADO OC`).
-3. Filtra iterativamente buscando específicamente qué filas están pendientes (es decir, ignora si la columna REALIZADA contiene `TRUE`, `SI` o `VERDADERO`).
+---
 
-### 2.2. Login en Coupa y Manejo de Sesión
-1. El RPA no inicia sesión cada vez desde cero. Para evadir validaciones excesivas del Single Sign-On de Microsoft/Google, utiliza un perfil persistente de navegador guardado en la carpeta local `/credentials/chrome_profile`. 
-2. Si es la primera ejecución y el archivo no existe, fuerza un guardado automático tras pedir autorización manual con la GUI de Playwright. Luego de esto, reusa la sesión pre-logeada cada vez que el programa se lanza.
+## 2. Requisitos Previos e Instalación (Setup)
+Para ejecutar este proyecto en cualquier entorno (ya sea técnico o de un analista de negocio), se deben tener instaladas las siguientes herramientas:
 
-### 2.3. Ejecución por cada línea pendiente
-Para cada fila leída en el Google Sheets, el robot realiza 2 evaluaciones cruciales: **¿La fila contiene monto NETO? ¿La fila contiene monto EXENTO?**
-Si ambos montos existen (mayor a cero/no vacíos), el bot procesará la misma fila **dos veces consecutivas**, generando **dos** Órdenes de Compra separadas (una sin IVA y otra con IVA) para reflejar las exigencias estructurales del retail.
+### Prerrequisitos de Software:
+1. **Python 3.10+** (Asegurarse de marcar "Add Python to PATH" durante la instalación).
+2. **Terminal/Línea de Comandos:** Símbolo del sistema, PowerShell o la terminal de VSCode.
+3. El archivo local de credenciales de Google: `token/credenciales.json` proveniente de Google Cloud Console (usado para la API de Sheets).
 
-El proceso exacto para cada OC construida, usando módulos atómicos de acción, es el siguiente:
+### Librerías Requeridas (Python Libraries):
+Ve a tu terminal dentro de la carpeta del proyecto y ejecuta estos comandos:
 
-1. **Buscar y Copiar Solicitud Base (`_buscar_y_copiar_solicitud`):** 
-   Se ubica en la barra de búsqueda de Actividad Reciente superior la solicitud que está transcrita en la columna "solicitud base" del Sheet. Se accede a ella y se le instruye al software clicar en el botón de **Copiar solicitud n.º X**. Esto traslada de inmediato toda una plantilla inicial a un nuevo carrito de compras.
+```bash
+# Instalación de las librerías base para controlar integraciones y navegadores
+pip install playwright google-api-python-client google-auth-httplib2 google-auth-oauthlib 
 
-2. **Llenar Justificación de Cabecera:**
-   Se enlaza el campo `DETALLE` más el `NOMBRE TIENDA` del Sheet (Ej: *Agua y Electricidad Aeropuerto*). Este texto combinatorio asienta el texto explicativo de cabecera principal e infiere mejor usabilidad para futuras auditorías o aprobadores.
+# Instalación e inicialización de los navegadores de Playwright
+playwright install
+```
 
-3. **Inpección y Borrado de archivos adjuntos pre-existentes:**
-   El bot inspecciona de manera táctica si la solicitud base (copiada en el paso 1) contemplaba archivos adjuntos o respaldos en PDF heredados y los elimina forzosamente ejecutando clics automatizados en la papelera, de forma que el nuevo boceto de OC nazca completamente "limpio".
+---
 
-4. **Fechas de Servicio de la Organización:**
-   Traslada al marco de navegación de la página inferior para actualizar la fecha respectiva. Si la `FECHA EMISIÓN` y la `FECHA VENCIMIENTO` operan sin fallos en el documento de SpreadSheets, el bot las aplica. Superando las restricciones visuales anti-robot del *Datepicker* de Coupa mediante tipeos absolutos con teclado forzado. La fecha límite o *"Need By"* se auto-calcula sumándole 30 días a la inyección inicial.
+## 3. Estructura del Código (Arquitectura)
+El código sigue las mejores prácticas y divide todo el trabajo masivo en módulos independientes funcionales:
 
-5. **Edición del Ítem/Línea de Solicitud (El Bloque Core):**
-   Es el paso en el cual los cruces contables vitales son procesados y aplicados mediante un panel de despliegue sobre el artículo.
+* **`config.py`**: El cerebro de constantes. Guarda las URLs, los IDs del documento de Google Sheets específico, constantes de tiempos dinámicos de espera (`TIMEOUT_CORTO`, `TIMEOUT_SELECTOR`), y el diccionario del mapeo para saber exactamente qué número de columna contiene los datos (Ej: `DETALLE = 8`).
+* **`google_sheets.py`**: Encargado puro de comunicarse con Google. Tiene métodos para hacer ping, solicitar acceso leyendo tu `credenciales.json`, extraer todas las filas cuya columna final diga `FALSE`, y otra función para devolver resultados (ej. enviar el #58793 de OC creada).
+* **`coupa_session.py`**: Maneja el inicio al portal usando Playwright pero cargando la carpeta secreta `credentials/chrome_profile`. Si el token interno de sesión (SSO de Microsoft/Natura) caduca, fuerza al analista a meter su contraseña manualmente una única vez, y recuerda esto para futuras repeticiones.
+* **`coupa_actions.py`**: La librería madre de Coupa. Contiene las "acciones atómicas" como `buscar_y_copiar_solicitud()`, `seleccionar_cuenta()`, `_seleccionar_impuesto()`, que interactúan físicamente (click y tipeo) con los cuadros de Coupa.
+* **`main.py` y `main_test.py`**: Son los controladores principales. `main_test.py` se encarga de probar **apenas una sola fila del Google Sheets**, ideal para probar selectores nuevos y guardar un borrador; mientras que `main.py` es el orquestador real que ciclará todo el Excel uno a uno, ejecutando el RPA y enviando a aprobaciones masivamente en bucle.
 
-   * **Artículo:** Replica estricta la misma lógica de texto aplicada a la Justificación en Cabecera (Detalle + Tienda).
-   * **Proveedor (Autocomplete / Carga Diferida):** Escribe el "COD SAP del proveedor". Al ser listas dinámicas alimentadas por Ajax, el bot simula una latencia humana, quitando e inyectando una última tecla con un delta de retardo manual para empujar la carga del panel servidor de Coupa, bajando virtualmente con la tecla "Flecha Abajo" para enclavar el nombre correcto exacto en el cuadro de input de Coupa sin clics imprecisos de mouse.
-   * **Commodity:** Presiona y escribe el código exacto de Commodity, forzando la visualización del listado virtual y disparando la validación del formulario con Enter.
-   * **Monto:** Inserta el monto neto analizado (o si es el ciclo del bloque exento, el valor despojado de IVA).
-   * **Plazo de Pago:** Localiza e identifica el factor de plan de pago "CL15" insertando texto y forzando autocompleciones emuladas como las líneas previas.
-   * **Impuesto (Tax Selectors):** Reemplaza el predeterminado con el condicional de la OC tratante. Limpia el "tag" flotante de Selección Actual del UI, y mediante validadores DOM obligará al sistema a elegir `Material sin impuesto (C0)` para Exento y `IVA 19%` para Neto, forzando búsquedas semánticas sobre los atributos Role > Option.
+---
 
-6. **Vínculo CO (Cuentas Contables y CECO de SAP):**
-   Despliega una modalidad sobre-flotante ("Elegir una cuenta"). A través del mapeo exhaustivo de Selectores ID nativos (`#account_segment...`), el robot borra selecciones previas sucias provenientes de la copia inicial y obliga a la API Frontend a captar el `CECO` al igual que la `Cuenta Mayor` listadas en la iteración Sheets de la fila correspondiente, confirmando por ventana los cambios aplicados en Coupa.
+## 4. Diagrama Fundamental: El Paso a Paso Lógico y Programático
 
-7. **Extracción Identitaria y Pre-Guardado:**
-   Acuerda guardados a los sub-layouts completados. Extrae la taxonomía del encabezado HTML (`h1` content > "#58744") separando la etiqueta alfanumérica filtrada mediante expresiones regulares (*Regex*), sustrayendo de este mecanismo el puro número para certificar una conclusión limpia tras guardarse el borrador (Test) o enviarse (Producción final).
+A continuación la narrativa enlazada entre los pasos lógicos de cómo lo vería un humano, y su homólogo a nivel de código (`main.py` llamando a `coupa_actions.py`).
 
-### 2.5. Actualización, Marcas y Retroalimentación
-Finalizada la corrida (independiente de si fue 1 ciclo por Neto o 2 ciclos mixtos de 1 OC exenta y 1 Neta), el script Python invoca un Call Externo HTTP seguro a `google_sheets` ejecutando la función `marcar_realizada`.
-Esta directriz accede a la matriz matriz, posicionándose en la columna pre configurada de `REALIZADA` sobre-escribiéndola con un `TRUE`. Así mismo en la columna destinada al `# OC`, clava de manera remota los números de solicitud que fue extrayendo en el paso previo (Ej. `58985` y/o `58986`), dejando sellada permanentemente como procesada esa fila y habilitando cualquier auditoría de control sin intervención humana adicional.
+### Paso 1: Localizar la tarea (Sheets)
+* **El robot:** Invoca `obtener_filas_pendientes()`.
+* **Programación:** Recorre el diccionario extraído del Sheet, si la fila en la tupla [23] (`REALIZADA`) dice `FALSE`, guarda los datos (CECO, Tienda, Monto, Proveedor, Código de Factura) dentro de un gran objeto llamado `datos` que luego inyectará en las funciones.
+* **Manejo Exento/Neto:** `main.py` pregunta si `datos["neto"]` contiene plata. Si es así, lanza una ejecución pasándole el estado `es_exento=False`. Cuando finaliza, el ciclo vuelve a preguntar si la misma fila trae registro en `datos["exento"]`, de ser así, lanza una **inmediatamente segunda ejecución paralela para la misma factura**, pero pasándole el parámetro `es_exento=True`.
+
+### Paso 2: Copia e Inicialización de Carrito de Compra 
+* **El robot:** Navega a la web predeterminada de "Actividad Reciente", busca en lo alto la OC antigua que sirve de clon, descrita en la columna `X` ("Solicitud Base"), la abre y copia.
+* **Programación:** `buscar_y_copiar_solicitud(page, datos["solicitud_base"])` usa manipuladores por ID robustos como `[id^='something']` para pulsar el botón clonar. Luego salta a `eliminar_adjunto(page)` que ubica una clase CSS de basurero `i.icon-remove` para dejar la solicitud prístina.
+
+### Paso 3: Relleno de Fechas y Textos descriptivos (Cabecera)
+* **El robot:** Modifica el título de la requisición copiando de forma combinada "Detalle + Almacén Tienda / Aeropuerto" en justificación. Adicionalmente, inserta la fecha tecleando por fuerza bruta sin usar el calendario emergente.
+* **Programación:** Pasa la etiqueta a `llenar_justificacion` e inserta los strings en el `<textarea>`. La fecha de `Need By` se calcula sumando 30 días usando `datetime` interno a `datetime.now()` e insertándola.
+
+### Paso 4: Relleno de las Cajas con Ajax (El núcleo)
+Para cada celda de datos que funciona en base a autocompletado inteligente asincrónico manejado por el servidor web Coupa (Proveedor, Cuenta, CECO):
+* **El robot:** No envía un texto "bloque", porque los Javascripts en la web no logran reaccionar. El robot tipearía rápido el código parcial, retrasaría unas docenas de milisegundos su movimiento de "dedos", presionaría un caracter final, y emitiría la orden de la Tecla Bajar (Flecha abajo) terminando con Enter (Return).
+* **Programación:** Esta es la barrera más desafiante. Se soluciona programáticamente accediendo al motor `keyboard` del navegador por sobre los roles estándar, ejemplo claro en `coupa_actions.py`:
+```python
+page.keyboard.type(str(ceco), delay=100) # Tecleado lento estilo humano de 0.1s/char
+time.sleep(2) # Espera a la API de validación interna de Coupa
+page.keyboard.press("ArrowDown") # Se fuerza mover a la clase css interna `.ui-menu-item`
+page.keyboard.press("Enter")
+```
+
+### Paso 5: Selección de Impuesto Dinámico
+* **El robot:** Dependiendo si es la ronda NETO o EXENTO, el pop-up de IVA requiere la elección de "IVA 19%" o "Material sin impuesto".
+* **Programación:** Invoca `_seleccionar_impuesto(page, es_exento)`. Se usa la API de Playwright (por roles de accesibilidad) la cual no se rige atada a IDs mutantes (ej. `#select2_choice`). El bot en cambio busca a un humano y se guía por las letras. Busca el campo flotante al lado de *"Tipo de línea Artículo SaaS"*, presiona borrar y hace tap en la opción `IVA 19%` usando literales como Regex `re.compile("Material sin impuesto", re.IGNORECASE)`.
+
+### Paso 6: Extracción y Guardado
+* **El robot:** Da clic en el botón guardar inferior general y lee un número oculto que arroja la ventana en la esquina superior izquierda. 
+* **Programación:** `page.locator("#pageHeader").inner_text()` usa regex `re.search(r"#(\d+)", texto_header)` para recuperar estrictamente los dígitos (ej. `53896`). Posteriormente, invoca al script `google_sheets._actualizar_linea_` y pega el valor en las posiciones indicadas de forma bidireccional, cerrando el bucle.
+
+
+---
+
+## 5. Escalado: Cómo extender el Proyecto (Para Principiantes/Técnicos)
+
+Si el negocio muta y requiere agregar un parámetro nuevo (por ejemplo, incluir un campo obligatorio que se llama "Subnúmero de Activo Fijo"), Playwright tiene mecanismos sencillos de aprender, inclusive sin saber programar HTML.
+
+A través del archivo auxiliar `lanzar_codegen.bat` ya entregado, Coupa emitirá un sistema para grabar la pantalla. Todo paso que des como humano creará la automatización exacta de sintaxis en un recuadro oscuro para que lo copies y pegues directamente a `coupa_actions.py`.
+
+### 5.1 Guía para agregar un campo de texto extra en Playwright
+Imagina que la compañía agrega el campo genérico `[Comprador Auxiliar]`:
+1. Asegúrate de añadir en la parte superior del `google_sheets.py` el índice de la columna en Excel: `COMPRADOR = 24`.
+2. Actualiza la función en `google_sheets` para que rescate su valor: `"comprador": fila[Col.COMPRADOR - 1]`.
+3. Para incorporarlo en Coupa, abre el archivo `.bat` local.
+4. En Coupa haz "clic" en el campo y copia la sentencia que da el Codegen oscuro. 
+5. Usualmente el Codegen te dará algo como esto: `page.get_by_role("textbox", name="Comprador Auxiliar").click()`.
+6. En `coupa_actions.py` creas una mini función llamada `_agregar_comprador_auxiliar(page, datos["comprador"])` y usas la función `.fill(texto)` del grabador.
+
+### 5.2 Diferencias en Localizadores (Locators) al lidiar con Plataformas Inestables
+Coupa usa la tecnología `Select2` la cual hace que la web cambie sus "IDs" y estructuras en tiempo real por cada actualización de mes. Se recomienda entender las tres jerarquías para localizar campos en interfaces volátiles:
+
+* **Nivel 1 (Ideal y Fiable): Selección por Semántica y Rol Humano**
+  * `page.get_by_role("button", name="Elegir una cuenta")` o `page.get_by_text("Mi campo")`. Esto imita cómo una persona invidente interactuaría. Jamás se romperá si el diseñador web le cambia las formas geométricas a los cuadros.
+  * *Uso en el RPA:* Guardar, Cancelar, Seleccionar Impuesto, Nombres de Formularios.
+
+* **Nivel 2 (Fuerte pero Rígido): Selección por ID de Cascarón Fijo**
+  * Los selectores CSS y los XPath de herencia directa.
+  * Ej: `page.locator("a.search-icon").first` o `page.locator("#account_segment_2_lv_id_chosen")`.
+  * *Uso en el RPA:* Los casilleros de selección de Cuentas Contables y CECO que Coupa etiqueta estrictamente segmentados con la etiqueta 'account_segment_n_chosen'.
+
+* **Nivel 3 (Evasivo - Último Recurso): Interacción con el Teclado Pura**
+  * Los inputs dinámicos en React/Angular de auto-completado, como el *"Proveedor COD SAP"*. Aquí los campos estallan porque no puedes esperar que un *click()* garantice que el contenido cruzó por red.
+  * Es el truco supremo:
+    ```python
+    campo = page.locator("[id^='supplierSearchAutocomplete']") # id^ ignora el sufijo mutante
+    campo.click()
+    page.keyboard.type("821848", delay=200) # Tecleado dilatado (200ms) que forza el Trigger
+    time.sleep(2) # Obliga a Python a esperar la respuesta JSON por red
+    page.keyboard.press("ArrowDown") # Captura el nodo UI
+    ```  
+
+### 5.3 Uso de las Esperas y Logs (Debugging)
+Si la página parece congelada pero funciona manual: el RPA es más veloz que la internet. Si los campos dan el evento de TimeOut (*Timeout 30000ms exceeded*):
+* Coloca `time.sleep(1)` o `time.sleep(2)` antes y después de campos que sabes cargan listados enormes de SAP.
+* O mejor aún, la validación segura de red: `page.wait_for_load_state("networkidle", timeout=30000)` que congela el robot hasta que la web deje de intercambiar paquetes de forma transigente. 
+
+Cualquier futura reescritura de módulos se hará conservando estos pilares y esta lectura general de las particularidades de `coupa_actions.py` y el motor `Playwright` asegurará años de estabilidad en un solo hilo al mes de automatización.
