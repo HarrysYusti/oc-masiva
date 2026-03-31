@@ -94,30 +94,6 @@ def llenar_justificacion(page: Page, detalle: str, nombre_tienda: str):
 
 
 # ============================================================================
-#  2b. LLENAR ARTÍCULO
-# ============================================================================
-
-def llenar_articulo(page: Page, detalle: str, nombre_tienda: str):
-    """
-    Llena el campo 'Artículo' con la misma justificación (DETALLE + NOMBRE_TIENDA).
-    
-    Args:
-        page: página de Playwright en la solicitud.
-        detalle: texto del tipo de servicio.
-        nombre_tienda: nombre de la tienda.
-    """
-    justificacion = f"{detalle} {nombre_tienda}".strip()
-    print(f"   📋 Llenando artículo: '{justificacion}'")
-    try:
-        campo = page.get_by_role("textbox", name="Artículo")
-        campo.click()
-        campo.press("Control+a")
-        campo.fill(justificacion)
-    except Exception as e:
-        print(f"   ⚠️ No se pudo llenar artículo: {e}")
-
-
-# ============================================================================
 #  3. ELIMINAR ADJUNTO EXISTENTE
 # ============================================================================
 
@@ -219,14 +195,16 @@ def editar_linea_solicitud(page: Page, datos: dict, es_exento: bool = False):
     # Esperar a que el formulario de edición esté visible
     time.sleep(2)  # Pequeña pausa para estabilidad del DOM dinámico
 
-    # --- 5.1 PROVEEDOR ---
-    # Buscar por COD SAP (selector parcial resiste IDs dinámicos)
+    # --- 5.1 PREPARAR ARTÍCULO ---
+    _llenar_articulo(page, datos["detalle"], datos["nombre_tienda"])
+
+    # --- 5.2 PROVEEDOR ---
     _seleccionar_proveedor(page, datos["cod_sap_proveedor"])
 
-    # --- 5.2 COMMODITY ---
+    # --- 5.3 COMMODITY ---
     _seleccionar_commodity(page, datos["commodity"])
 
-    # --- 5.3 PRECIO UNITARIO ---
+    # --- 5.4 PRECIO UNITARIO ---
     monto = datos["exento"] if es_exento else datos["neto"]
     _llenar_precio(page, monto)
 
@@ -235,10 +213,8 @@ def editar_linea_solicitud(page: Page, datos: dict, es_exento: bool = False):
 
     # --- 5.5 FECHA LÍMITE (Hoy + 30 días) ---
     import datetime
-    # Formato dd/mm/aa que acepta Coupa (ej: 26/04/26)
     fecha_limite = (datetime.datetime.now() + datetime.timedelta(days=30)).strftime("%d/%m/%y")
     _seleccionar_fecha_limite(page, fecha_limite)
-    print(f"      📅 Fecha límite calculada: {fecha_limite}")
 
     # --- 5.6 IMPUESTO ---
     _seleccionar_impuesto(page, es_exento)
@@ -246,49 +222,58 @@ def editar_linea_solicitud(page: Page, datos: dict, es_exento: bool = False):
     print("   ✅ Línea de solicitud editada.")
 
 
+def _llenar_articulo(page: Page, detalle: str, nombre_tienda: str):
+    """
+    Llena el campo 'Artículo' en la línea de solicitud.
+    """
+    texto = f"{detalle} {nombre_tienda}".strip()
+    print(f"      📄 Llenando Artículo: {texto}")
+    try:
+        # Usamos locators genéricos para descripción en Coupa
+        campo = page.locator("input[name*='description'], input[id*='description']").first
+        if not campo.is_visible(timeout=TIMEOUT_CORTO):
+            # Fallback
+            campo = page.locator(".line-description input[type='text']").first
+            
+        if campo.is_visible(timeout=TIMEOUT_CORTO):
+            campo.click()
+            campo.press("Control+a")
+            campo.press("Backspace")
+            campo.fill(texto)
+    except Exception as e:
+        print(f"      ⚠️ No se pudo ubicar el campo Artículo: {e}")
+
+
 def _seleccionar_proveedor(page: Page, cod_sap_proveedor: str):
     """
-    Busca y selecciona el proveedor en el autocomplete usando el COD SAP.
-    
-    Estrategia:
-    1. Buscar por [id^="supplierSearchAutocomplete"] (parcial, resiste IDs dinámicos)
-    2. Escribir el código SAP del proveedor
-    3. Al buscar con ese código solo debería aparecer 1 resultado
-    4. Seleccionar el primer resultado del dropdown
-    
-    Args:
-        page: página de Playwright.
-        cod_sap_proveedor: código SAP del proveedor (ej: "821848").
+    Busca y selecciona el proveedor tipeando el código, quitando y poniendo 
+    el último dígito para forzar la carga AJAX de Coupa.
     """
     print(f"      🏢 Seleccionando proveedor por COD SAP: {cod_sap_proveedor}")
 
-    campo_proveedor = page.locator("[id^='supplierSearchAutocomplete']").first
+    campo = page.locator("input[id^='supplierSearchAutocomplete']").first
+    campo.click()
+    campo.fill("")
+    
+    # Lógica de "despertar" el autocompletado
+    codigo_inicio = str(cod_sap_proveedor)[:-1]
+    ultimo_digito = str(cod_sap_proveedor)[-1]
 
-    # Limpiar campo totalmente antes de escribir el código SAP para forzar la búsqueda
-    campo_proveedor.click()
-    campo_proveedor.press("Control+a")
-    campo_proveedor.press("Backspace")
+    # Llenamos el inicio
+    campo.fill(codigo_inicio)
     time.sleep(1)
-    # Escribir el nuevo código
-    campo_proveedor.fill(str(cod_sap_proveedor))
+    # Tipeamos el último dígito con retraso para disparar la validación
+    campo.press_sequentially(ultimo_digito, delay=200)
 
-    # Esperar a que el tooltip despliegue buscando en la base de datos de Coupa
-    time.sleep(2)
+    # Esperar a que la sugerencia aparezca desde el servidor
+    time.sleep(2.5)
 
-    # Seleccionar el primer item de la lista igual que commodity: ArrowDown + Enter
-    campo_proveedor.press("ArrowDown")
+    # Navegar hacia abajo y seleccionar (mucho más seguro que hacer clic en elementos dinámicos)
+    campo.press("ArrowDown")
     time.sleep(0.5)
-    campo_proveedor.press("Enter")
-    print(f"      ✅ Proveedor autocompletado.")
-
-    # Click en "Show All Items" si está visible (para expandir opciones)
-    boton_show_all = page.get_by_role("button", name="Show All Items")
-    try:
-        if boton_show_all.is_visible(timeout=3000):
-            boton_show_all.click()
-            time.sleep(1)
-    except Exception:
-        pass
+    campo.press("Enter")
+    
+    print("      ✅ Proveedor seleccionado.")
 
 
 def _seleccionar_commodity(page: Page, commodity: str):
@@ -409,45 +394,43 @@ def _seleccionar_fecha_limite(page: Page, fecha_vencimiento: str):
 
 def _seleccionar_impuesto(page: Page, es_exento: bool):
     """
-    Selecciona el tipo de impuesto en el formulario de edición.
-    Para NETO: 'IVA 19% Impuesto Valor Agregado (C1)'
-    Para EXENTO: 'Material sin impuesto (C0)'
-    
-    1. Borrar selección actual (haciendo click en la X).
-    2. Click para buscar.
-    3. Escribir y seleccionar usando la lista o texto exacto.
+    Selecciona el tipo de impuesto (IVA 19% o Material sin impuesto) basándose en el codegen.
+    Al finalizar, hace clic en el botón 'Guardar' de la caja de edición de línea.
     """
     desc_tipo = "Material sin impuesto (C0)" if es_exento else "IVA 19%"
     print(f"      🧾 Configurando impuesto para {desc_tipo}...")
 
     try:
-        # Quitar impuesto actual usando la "X" / Borrar selección
-        boton_borrar = page.locator(".select2-search-choice-close, a.select2-choice abbr").first
+        # Apuntar a la celda específica como hace el codegen
+        celda_linea = page.get_by_role("cell", name=re.compile("Tipo de línea", re.IGNORECASE))
+        
+        # Borrar selección previa si existe
+        boton_borrar = celda_linea.get_by_label("Borrar selección")
         if boton_borrar.is_visible(timeout=2000):
             boton_borrar.click()
             time.sleep(1)
-    except Exception:
-        pass
 
-    try:
-        # Abrir el selector de impuestos (Select2 box)
-        caja_impuesto = page.locator(".select2-choice").last
-        caja_impuesto.click(timeout=TIMEOUT_CORTO)
+        # Clic en "Seleccionar"
+        page.locator("a").filter(has_text=re.compile(r"^Seleccionar$")).last.click()
         time.sleep(1)
 
-        # Buscar escribiendo el tipo de impuesto
-        texto_buscar = "Material sin impuesto" if es_exento else "IVA 19%"
-        caja_busqueda = page.locator("input.select2-input.select2-focused").first
-        caja_busqueda.fill(texto_buscar)
-        time.sleep(1.5)
-
-        # Apretar ArrowDown para agarrar el primer resultado y dar Enter
-        caja_busqueda.press("ArrowDown")
-        time.sleep(0.5)
-        caja_busqueda.press("Enter")
+        # Seleccionar la opción correcta
+        if es_exento:
+            page.get_by_role("option", name=re.compile("Material sin impuesto", re.IGNORECASE)).click()
+        else:
+            page.get_by_role("option", name=re.compile("IVA 19%|Impuesto Valor", re.IGNORECASE)).click()
+            
         print(f"      ✅ Impuesto '{desc_tipo}' aplicado.")
+        
+        # --- CLIC EN GUARDAR LA CAJA ---
+        print("      💾 Guardando formulario de la línea...")
+        page.locator("#edit-line").get_by_role("button", name="Guardar").click(timeout=TIMEOUT_CORTO)
+        page.wait_for_load_state("networkidle", timeout=TIMEOUT_NAVEGACION)
+        time.sleep(2) # Pausa breve para asegurar que la caja se cierre por completo
+        print("      ✅ Línea guardada exitosamente.")
+
     except Exception as e:
-        print(f"      ⚠️ No se pudo seleccionar el impuesto {desc_tipo}. Detalle: {e}")
+        print(f"      ⚠️ Error al seleccionar el impuesto o guardar la línea: {e}")
 
 
 # ============================================================================
@@ -456,134 +439,82 @@ def _seleccionar_impuesto(page: Page, es_exento: bool):
 
 def seleccionar_cuenta(page: Page, cuenta_contable: str, ceco: str):
     """
-    Abre el modal 'Elegir una cuenta' y rellena los campos:
-    - '2 - Objeto Colector / Centro de Costos / PEP' con el código CECO
-    - '5 - Cuenta Mayor' con el código de cuenta contable
-    Luego presiona 'Elegir' para confirmar.
-    
-    Args:
-        page: página de Playwright.
-        cuenta_contable: código de cuenta mayor (ej: "3305012006").
-        ceco: código de objeto colector/centro de costos (ej: "0041001004").
+    Selecciona la cuenta contable y el centro de costos usando page.keyboard 
+    para evadir los inputs dinámicos flotantes de Coupa.
     """
     print(f"   🏦 Configurando cuenta contable: {cuenta_contable}, CECO: {ceco}")
 
+    # Abrir modal
     try:
-        # Abrir el icono de lupita junto a la cuenta para editar
-        # (Puede ser botón 'Elegir una cuenta' o el ícono de edición si ya hay una cuenta)
-        boton_cuenta = page.locator(
-            "button[title='Elegir una cuenta'], "
-            "a[title='Elegir una cuenta'], "
-            "[aria-label='Elegir una cuenta']"
-        ).first
-        try:
-            if boton_cuenta.is_visible(timeout=TIMEOUT_CORTO):
-                boton_cuenta.click()
-            else:
-                # Fallback: buscar por texto
-                page.get_by_role("button", name="Elegir una cuenta").click()
-        except Exception:
-            page.get_by_role("link", name="Elegir una cuenta").click()
-
-        # Esperar a que abra el modal
-        page.wait_for_selector("text=Elegir un cuadro de cuentas", timeout=TIMEOUT_SELECTOR)
-        time.sleep(2)
-
-        # --- Campo CECO: '2 - Objeto Colector / Centro de Costos / PEP' ---
-        print(f"      🎯 Escribiendo CECO: {ceco}")
-        campo_ceco = page.locator(
-            "[id*='object_collector'], "
-            "[id*='cost_center'], "
-            "[aria-label*='Objeto Colector']"
-        ).first
-        if not campo_ceco.is_visible(timeout=3000):
-            # Fallback: buscar por placeholder o el label del campo 2
-            campo_ceco = page.locator(".select2-container").nth(1)
-        campo_ceco.click()
-        time.sleep(1)
-        # Buscar en el input de búsqueda del select2
-        buscador = page.locator("input.select2-input").last
-        buscador.fill(str(ceco))
-        time.sleep(2)
-        buscador.press("ArrowDown")
-        time.sleep(0.5)
-        buscador.press("Enter")
-        print(f"      ✅ CECO '{ceco}' seleccionado.")
-        time.sleep(1)
-
-        # --- Campo Cuenta Mayor: '5 - Cuenta Mayor' ---
-        print(f"      🎯 Escribiendo Cuenta Mayor: {cuenta_contable}")
-        # El campo 5 suele ser el último select2 del modal antes del boton Elegir
-        campo_mayor = page.locator(".select2-container").nth(4)
-        campo_mayor.click()
-        time.sleep(1)
-        buscador2 = page.locator("input.select2-input").last
-        buscador2.fill(str(cuenta_contable))
-        time.sleep(2)
-        buscador2.press("ArrowDown")
-        time.sleep(0.5)
-        buscador2.press("Enter")
-        print(f"      ✅ Cuenta Mayor '{cuenta_contable}' seleccionada.")
-        time.sleep(1)
-
-        # --- Presionar 'Elegir' para confirmar ---
-        page.get_by_role("button", name="Elegir").click()
-        page.wait_for_load_state("networkidle", timeout=TIMEOUT_NAVEGACION)
-        print("   ✅ Cuenta seleccionada y confirmada.")
-
-    except Exception as e:
-        print(f"   ⚠️ Error seleccionando cuenta: {e}")
-
-
-# ============================================================================
-#  7. AGREGAR APROBADOR
-# ============================================================================
-
-def agregar_aprobador(page: Page, aprobador: str):
-    """
-    Agrega un aprobador a la solicitud buscándolo por nombre/email.
+        page.get_by_role("button", name="Elegir una cuenta").click(timeout=TIMEOUT_CORTO)
+    except Exception:
+        page.get_by_text(re.compile("Elegir una cuentaclose|Elegir una cuenta", re.IGNORECASE)).first.click()
     
-    Args:
-        page: página de Playwright.
-        aprobador: email o nombre del aprobador (ej: "javiermancilla@natura.net").
-    """
-    print(f"   👤 Agregando aprobador: {aprobador}")
+    page.wait_for_load_state("networkidle", timeout=TIMEOUT_NAVEGACION)
+    time.sleep(2)
 
-    # Click en "Agregar" para abrir el campo de aprobadores
-    boton_agregar = page.get_by_role("button", name="Agregar", exact=True)
     try:
-        boton_agregar.click(timeout=TIMEOUT_CORTO)
+        # =================================================================
+        # 1. LLENAR CECO (Objeto Colector / Centro de Costos)
+        # =================================================================
+        sector_ceco = page.locator("#account_segment_2_lv_id_chosen")
+        
+        # Borrar si hay algo
+        boton_borrar_ceco = sector_ceco.get_by_role("button", name="Borrar selección")
+        if boton_borrar_ceco.is_visible(timeout=2000):
+            boton_borrar_ceco.click()
+            time.sleep(1)
+        
+        # Abrir el dropdown (esto pone el cursor a parpadear en el buscador invisible)
+        sector_ceco.locator("a").filter(has_text="Seleccionar").click()
         time.sleep(1)
-    except Exception:
-        print("   ⚠️ Botón 'Agregar' no encontrado. Puede que ya haya un aprobador.")
-        return
-
-    # Buscar el aprobador por nombre/email
-    campo_nombre = page.get_by_role("combobox", name="Nombre")
-    try:
-        campo_nombre.click()
-        # Si viene con @ (email), usar todo. Si no, usar los primeros caracteres para que busque.
-        termino = aprobador.split("@")[0] if "@" in aprobador else aprobador
-        # Limpiar y escribir la búsqueda
-        campo_nombre.press("Control+a")
-        campo_nombre.press("Backspace")
-        campo_nombre.fill(termino)
-        time.sleep(2.5) # Esperar al servidor
-
-        # Seleccionar del dropdown apretando hacia abajo y Enter
-        campo_nombre.press("ArrowDown")
+        
+        # 🔥 TRUCO: Escribir directamente en el teclado y seleccionar
+        page.keyboard.type(str(ceco), delay=100)
+        time.sleep(2) # Esperar que Coupa filtre la lista
+        page.keyboard.press("ArrowDown")
         time.sleep(0.5)
-        campo_nombre.press("Enter")
-        print(f"   ✅ Aprobador seleccionado ('{termino}').")
-    except Exception as e:
-        print(f"   ⚠️ Error al buscar aprobador '{aprobador}': {e}")
+        page.keyboard.press("Enter")
+        
+        print(f"   ✅ CECO '{ceco}' tecleado y asignado.")
+        time.sleep(1)
 
-    # Confirmar con segundo click en "Agregar"
-    try:
-        boton_agregar_confirm = page.get_by_role("button", name="Agregar", exact=True)
-        boton_agregar_confirm.click(timeout=TIMEOUT_CORTO)
-    except Exception:
-        pass
+        # =================================================================
+        # 2. LLENAR CUENTA MAYOR
+        # =================================================================
+        sector_cuenta = page.locator("#account_segment_5_lv_id_chosen")
+        
+        # Borrar si hay algo
+        boton_borrar_cuenta = sector_cuenta.get_by_role("button", name="Borrar selección")
+        if boton_borrar_cuenta.is_visible(timeout=2000):
+            boton_borrar_cuenta.click()
+            time.sleep(1)
+
+        # Abrir el dropdown
+        sector_cuenta.locator("a").filter(has_text="Seleccionar").click()
+        time.sleep(1)
+        
+        # 🔥 TRUCO: Escribir directamente y seleccionar
+        page.keyboard.type(str(cuenta_contable), delay=100)
+        time.sleep(2)
+        page.keyboard.press("ArrowDown")
+        time.sleep(0.5)
+        page.keyboard.press("Enter")
+        
+        print(f"   ✅ Cuenta Mayor '{cuenta_contable}' tecleada y asignada.")
+        time.sleep(1)
+
+        # =================================================================
+        # 3. CONFIRMAR SELECCIÓN
+        # =================================================================
+        page.get_by_role("link", name="Elegir").first.click()
+        page.wait_for_load_state("networkidle")
+        print("   ✅ Selección de cuenta aplicada y modal cerrada.")
+
+    except Exception as e:
+        print(f"   ⚠️ Error seleccionando cuenta/CECO: {e}")
+
+
 
 
 # ============================================================================

@@ -23,7 +23,6 @@ from coupa_actions import (
     seleccionar_fechas,
     editar_linea_solicitud,
     seleccionar_cuenta,
-    agregar_aprobador,
     extraer_numero_solicitud,
     enviar_para_aprobacion,
 )
@@ -55,10 +54,7 @@ def procesar_una_oc(page, datos: dict, es_exento: bool) -> str:
     # --- Paso 6: Cuenta contable y CECO ---
     seleccionar_cuenta(page, datos["cuenta_contable"], datos["ceco"])
 
-    # --- Paso 7: Agregar aprobador ---
-    agregar_aprobador(page, datos["aprobador"])
-
-    # --- Paso 8: Extraer # de solicitud ---
+    # --- Paso 7: Extraer # de solicitud ---
     numero_solicitud = extraer_numero_solicitud(page)
 
     # --- Paso 9: Enviar para aprobación ---

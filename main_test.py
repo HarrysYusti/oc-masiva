@@ -16,7 +16,7 @@ import sys
 import traceback
 from playwright.sync_api import sync_playwright
 
-from google_sheets import conectar_sheets, obtener_filas_pendientes
+from google_sheets import conectar_sheets, obtener_filas_pendientes, marcar_realizada
 from coupa_session import iniciar_sesion
 from coupa_actions import (
     buscar_y_copiar_solicitud,
@@ -25,7 +25,6 @@ from coupa_actions import (
     seleccionar_fechas,
     editar_linea_solicitud,
     seleccionar_cuenta,
-    agregar_aprobador,
     extraer_numero_solicitud,
     guardar_borrador,
 )
@@ -57,10 +56,7 @@ def procesar_una_oc_test(page, datos: dict, es_exento: bool) -> str:
     # --- Paso 6: Cuenta contable y CECO ---
     seleccionar_cuenta(page, datos["cuenta_contable"], datos["ceco"])
 
-    # --- Paso 7: Agregar aprobador ---
-    agregar_aprobador(page, datos["aprobador"])
-
-    # --- Paso 8: Extraer # de solicitud ---
+    # --- Paso 7: Extraer # de solicitud ---
     numero_solicitud = extraer_numero_solicitud(page)
 
     # --- Paso 9: GUARDAR como borrador (NO enviar para aprobación) ---
@@ -69,7 +65,7 @@ def procesar_una_oc_test(page, datos: dict, es_exento: bool) -> str:
     return numero_solicitud
 
 
-def procesar_fila_test(page, datos: dict):
+def procesar_fila_test(page, worksheet, datos: dict):
     """
     Procesa UNA fila en modo prueba.
     Si la fila tiene tanto Neto como Exento, procesará 2 OCs distintas.
@@ -101,6 +97,9 @@ def procesar_fila_test(page, datos: dict):
 
     # Mostrar resultado final
     numeros_str = ", ".join(ocs_generadas) if ocs_generadas else "Ninguna OC generada"
+
+    # --- Paso 10: Actualizar Google Sheet ---
+    marcar_realizada(worksheet, fila_num, numeros_str)
 
     print(f"\n{'='*60}")
     print(f"✅ PRUEBA COMPLETADA — Fila {fila_num}")
@@ -156,7 +155,7 @@ def main():
 
         # --- Procesar la fila de prueba ---
         try:
-            procesar_fila_test(page, primera_fila)
+            procesar_fila_test(page, worksheet, primera_fila)
         except Exception as e:
             print(f"\n❌ Error durante la prueba: {e}")
             traceback.print_exc()
